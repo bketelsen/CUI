@@ -130,13 +130,21 @@ def doc_link(label, target, anchors):
         return f'<a href="#/c/{anchors[anchor]}">{label}</a>'
     doc = re.match(r"^(?:\.\./)?(?:docs/)?([\w-]+)\.md(?:#([\w-]+))?$", target)
     if doc and doc.group(1) in GUIDE_IDS:
-        return f'<a href="#/guide/{doc.group(1)}' + (f'/{doc.group(2)}' if doc.group(2) else '') + f'">{label}</a>'
+        if doc.group(2) and GUIDE_SECTIONS.get(doc.group(2), "").startswith(doc.group(1) + "/"):   # a section, or the section of a subsection
+            return f'<a href="#/guide/{GUIDE_SECTIONS[doc.group(2)]}">{label}</a>'
+        sec = re.sub(r"^\d+-", "", doc.group(2) or "")   # "## 7. Files and links" is the section files-and-links
+        return f'<a href="#/guide/{doc.group(1)}' + (f'/{sec}' if sec else '') + f'">{label}</a>'
     if doc and doc.group(1) in ("components", "components-more"):
         return f'<a href="#/components">{label}</a>'
-    repo = re.match(r"^\.\./([\w./-]+)$", target)   # a file or folder of the repository, from docs/
+    if target.startswith("#") and anchor in GUIDE_SECTIONS:   # a section of a guide, linked from inside it
+        return f'<a href="#/guide/{GUIDE_SECTIONS[anchor]}">{label}</a>'
+    repo = re.match(r"^\.\./([\w./-]+)(#[\w-]+)?$", target)   # a file or folder of the repository, from docs/
     if repo:
         kind = "blob" if "." in repo.group(1).rsplit("/", 1)[-1] else "tree"
-        return f'<a href="{REPO_URL}/{kind}/master/{repo.group(1)}" target="_blank" rel="noreferrer">{label}</a>'
+        return f'<a href="{REPO_URL}/{kind}/master/{repo.group(1)}{repo.group(2) or ""}" target="_blank" rel="noreferrer">{label}</a>'
+    if doc:   # a doc that is not a guide on the site, such as CONTRIBUTING.md or architecture.md
+        frag = f"#{doc.group(2)}" if doc.group(2) else ""
+        return f'<a href="{REPO_URL}/blob/master/docs/{doc.group(1)}.md{frag}" target="_blank" rel="noreferrer">{label}</a>'
     return f'<span class="doc-ref" title="{html.escape(target)}">{label}</span>'
 
 def inline(text, anchors):
@@ -165,8 +173,22 @@ def inline(text, anchors):
     return re.sub(r"\x00(\d+)\x00", lambda m: kept[int(m.group(1))], "".join(out))
 
 # the guide: docs/*.md in reading order (components have their own pages)
-GUIDES = ["getting-started", "tutorial", "layout", "theming", "icons", "custom-components", "integration", "rendering", "performance", "design"]
+GUIDES = ["getting-started", "tutorial", "apps", "recipes", "layout", "theming", "icons", "custom-components", "integration", "rendering", "performance", "faq", "design"]
 GUIDE_IDS = set(GUIDES)
+# each guide's section anchors (as GitHub makes them from the "## " headings), for links within a guide
+def guide_sections():
+    out = {}
+    anchor_of = lambda t: re.sub(r"[^\w\- ]", "", t.strip().lower()).replace(" ", "-")
+    for gid in GUIDES:
+        sec = None
+        for ln in open(f"{ROOT}/docs/{gid}.md", encoding="utf-8"):
+            if ln.startswith("## "):
+                sec = re.sub(r"^\d+-", "", anchor_of(ln[3:]))
+                out.setdefault(anchor_of(ln[3:]), f"{gid}/{sec}")
+            elif ln.startswith("### ") and sec:   # a subsection: the site opens its section
+                out.setdefault(anchor_of(ln[4:]), f"{gid}/{sec}")
+    return out
+GUIDE_SECTIONS = guide_sections()
 
 IMG_RE = re.compile(r"images/((?:components|showcase)/)?([\w\-]+?)(?:-dark)?\.png")
 
@@ -380,9 +402,59 @@ def header_index():
         ret = re.sub(r"\bconst\b|\*|\s", "", m.group(1))
         params = re.findall(r"\b(cui_\w+)\b\s*\**\s*(?:const\s*)?\w*\s*(?:,|$)", m.group(3))
         FN_SIG[m.group(2)] = (ret, params)
+    for entry in list(structs.values()) + list(DATA_STRUCTS.values()): fill_docs(entry["fields"])
     return fn_struct, structs
 
 DATA_STRUCTS, ENUMS, FN_SIG = {}, {}, {}
+
+# What a field means when cui.h gives it no comment of its own: fields that mean the same
+# in every component (name, type). A comment in the header always wins.
+SIZE_DOC = "`CUI_FILL`, `CUI_FIT`, `CUI_PX(n)` or `CUI_PCT(n)`; unset uses the component's own."
+GENERIC_DOCS = {
+    ("width", "cui_size"): "Width: " + SIZE_DOC,
+    ("height", "cui_size"): "Height: " + SIZE_DOC,
+    ("width", "float"): "Width in points; 0 uses the component's own.",
+    ("height", "float"): "Height in points; 0 uses the component's own.",
+    ("size", "float"): "Size in points; 0 uses the component's own.",
+    ("gap", "float"): "Space between the items, in points.",
+    ("pad", "float"): "Padding inside, in points.",
+    ("icon", "const char *"): "An icon: a `CUI_ICON_*` constant, or a string from another icon font.",
+    ("icons", "const char *const *"): "One icon per item, in the same order as the items.",
+    ("color", "cui_color"): "A theme color such as `CUI_COLOR_ACCENT`, or `CUI_RGB(0x7747ff)`; unset uses the theme's.",
+    ("label", "const char *"): "A label shown above or beside the control.",
+    ("placeholder", "const char *"): "Muted text shown while the field is empty.",
+    ("description", "const char *"): "A second line of smaller text.",
+    ("tooltip", "const char *"): "Text shown when the pointer rests on it.",
+    ("format", "const char *"): 'A printf format for the values, such as `"%.0f ms"`.',
+    ("unit", "const char *"): "A unit shown after the value.",
+    ("shortcut", "const char *"): 'The shortcut shown beside it, as text such as `"Ctrl N"`.',
+    ("disabled", "bool"): "Greyed out, and takes no input.",
+    ("read_only", "bool"): "Shows the value but does not let it be edited.",
+    ("full_width", "bool"): "Stretches to the width of its container.",
+    ("autofocus", "bool"): "Takes the keyboard focus when it first appears.",
+    ("striped", "bool"): "Shades every other row.",
+    ("sortable", "bool"): "The column's header can be clicked to sort by it.",
+    ("no_border", "bool"): "Draws no border.",
+    ("no_legend", "bool"): "Hides the legend.",
+    ("no_grid", "bool"): "Hides the grid lines.",
+    ("hide_value", "bool"): "Hides the value's text.",
+    ("show_value", "bool"): "Shows the value as text.",
+    ("indeterminate", "bool"): "An animation with no amount, for work of unknown length.",
+    ("dismissible", "bool"): "Shows a close button.",
+    ("danger", "bool"): "Drawn in the danger color, for destructive actions.",
+    ("decimals", "int"): "Digits after the decimal point.",
+    ("step", "float"): "The amount one step changes the value by.",
+    ("step", "double"): "The amount one step changes the value by.",
+}
+def fill_docs(fields):
+    for f in fields:
+        if f["doc"]: continue
+        base = re.sub(r"\bconst\b|\*|\[[^\]]*\]|\s", "", f["type"])
+        if base in ENUMS and "*" not in f["type"] and 1 < len(ENUMS[base]) <= 12:
+            vals = ENUMS[base]
+            f["doc"] = comment_html("One of " + ", ".join(f"`{v}`" for v in vals[:-1]) + f" or `{vals[-1]}`.")
+        elif (f["name"], f["type"]) in GENERIC_DOCS:
+            f["doc"] = comment_html(GENERIC_DOCS[(f["name"], f["type"])])
 # value types every page uses; their fields are in the Layout and Theming guides
 CORE_TYPES = {"cui_ctx", "cui_rect", "cui_vec2", "cui_color", "cui_size", "cui_corners", "cui_box", "cui_texture",
               "cui_font", "cui_id", "cui_date", "cui_key_combo"}
@@ -615,6 +687,141 @@ def keyboard_lines(body_html):
             if s and s not in out: out.append(s)
     return out, note
 
+# ---------------------------------------------------------------- the function reference
+REF_HEADERS = ["include/cui/cui.h", "include/cui/cui_app.h", "include/cui/cui_render.h"]
+
+def reference(fn_struct, owners, items):
+    """Every public function in the headers, in header order under the header's own section
+    titles: its signature, the comment written beside it, and the page that explains it."""
+    declared = set()
+    for rel in REF_HEADERS: declared |= set(re.findall(r"CUI_API\b[^;(]*?\b(cui_\w+)\s*\(", strip_comments(read(rel))))
+    macros = set()
+    for rel in REF_HEADERS: macros |= set(re.findall(r"^\s*#define\s+(cui_\w+)\(", read(rel), re.M))
+    out = []
+    for rel in REF_HEADERS:
+        lines = read(rel).split("\n")
+        sec = {"title": {"cui.h": "Setup", "cui_app.h": "The app window", "cui_render.h": "Renderers"}[rel.split("/")[-1]], "header": rel, "fns": []}
+        i = 0
+        while i < len(lines):
+            ln = lines[i]
+            banner = re.match(r"/\* -{20,} \*/$", ln.strip())
+            title = None
+            if banner and i + 2 < len(lines) and re.match(r"/\* -{20,} \*/$", lines[i + 2].strip()):
+                title = comment_text(lines[i + 1]); i += 2
+            else:
+                sub = re.match(r"/\* -{3,} (.+?) -{3,} \*/$", ln.strip())
+                if sub: title = sub.group(1)
+            if title:
+                if sec["fns"]: out.append(sec)
+                sec = {"title": title, "header": rel, "fns": []}
+                i += 1; continue
+            if ln.startswith("CUI_API"):
+                start = i; decl = ln
+                while ";" not in strip_comments(decl) and i + 1 < len(lines): i += 1; decl += " " + lines[i].strip()
+                code = strip_comments(decl); code = re.sub(r"\s+", " ", code[:code.index(";")]).replace("CUI_API ", "").strip()
+                code = re.sub(r"\s*CUI_\w+\([^)]*\)\s*$", "", code)      # a printf-format attribute after the parameters
+                m = re.search(r"\b(cui_\w+)\s*\(", code)
+                if m:
+                    name = m.group(1)
+                    doc = " ".join(comment_text(c) for c in re.findall(r"/\*.*?\*/", decl[decl.index(";"):], re.S))
+                    if not doc:   # the comment block directly above
+                        k, above = start - 1, []
+                        while k >= 0 and lines[k].strip() and (lines[k].strip().startswith(("/*", "*", "//")) or lines[k].strip().endswith("*/")) and not re.match(r"/\* -{3,}", lines[k].strip()):
+                            above.insert(0, lines[k]); k -= 1
+                            if above[0].strip().startswith("/*"): break
+                        if above and above[0].strip().startswith(("/*", "//")): doc = comment_text("\n".join(above))
+                    call, sig = name, code
+                    # the name people call: the named-argument macro over an _ex function, or the
+                    # block macro over a _begin_ex one (cui_dialog(ui, ...) { children })
+                    block = False
+                    for suffix in ("_begin_ex", "_begin", "_ex"):
+                        short = name[:-len(suffix)] if name.endswith(suffix) else None
+                        if short and short in macros and short not in declared:
+                            call, block = short, suffix != "_ex"
+                            sig = re.sub(rf"\b{name}\b", short, re.sub(r",?\s*const cui_\w+ \*\s*opts\s*\)$", ", ...)", code))
+                            sig = sig.replace("(, ...)", "(...)")
+                            if block: sig = sig[sig.index(short):] + " { ... }"
+                            break
+                    if not block: sig += ";"
+                    users = [it["id"] for it in items.values() if call in it["apis"]]
+                    page = next((i_ for i_ in sorted(owners.get(call, ())) if i_ in items), None) or (users[0] if len(users) == 1 else None)
+                    if fn_struct.get(call) in LAYOUT_STRUCTS: page = None    # the layout guide explains these
+                    sec["fns"].append({"name": call, "sig": sig, "doc": comment_html(doc), "line": start + 1,
+                                       "opts": fn_struct.get(call) if call != name else None, "page": page})
+            i += 1
+        if sec["fns"]: out.append(sec)
+    # the guide that explains a section whose functions have no component page
+    guide_of = {"Layout": "layout", "Theme": "theming", "Fonts": "theming", "Custom drawing": "custom-components", "Identity": "getting-started",
+                "Context and frame": "integration", "Input (called by the platform layer)": "integration", "Draw data (consumed by renderers)": "rendering",
+                "software renderer": "integration", "OpenGL renderer": "integration", "The app window": "getting-started"}
+    used = set()
+    for sct in out:
+        sct["guide"] = guide_of.get(sct["title"])
+        base = slug(sct["title"]); sid = base; k = 2
+        while sid in used: sid = f"{base}-{k}"; k += 1
+        used.add(sid); sct["id"] = sid
+    return out
+
+# ---------------------------------------------------------------- complete programs
+# A page's Usage block is a fragment. Where the scene that draws the page's live example
+# stands on its own, the page also gets it as a whole program: includes, a frame function
+# and main, ready to compile. Each one is compiled here (syntax only), and a scene that
+# does not compile alone is left out, so no page shows a program that does not build.
+SCENE_GLOBALS = [
+    ("b_on", "static bool b_on = true;"), ("b_off", "static bool b_off = false;"), ("b_check", "static bool b_check = true;"),
+    ("b_check2", "static bool b_check2 = false;"), ("f_vol", "static float f_vol = 62;"), ("f_lo", "static float f_lo = 25;"),
+    ("f_hi", "static float f_hi = 70;"), ("i_seg", "static int i_seg = 1;"), ("i_tab", "static int i_tab = 0;"),
+    ("i_radio", "static int i_radio = 1;"), ("i_rating", "static int i_rating = 4;"), ("i_sel", "static int i_sel = 2;"),
+    ("i_page", "static int i_page = 2;"), ("s_name", 'static char s_name[64] = "Maya Okafor";'), ("s_email", 'static char s_email[64] = "";'),
+    ("s_pw", 'static char s_pw[32] = "secret";'), ("s_search", 'static char s_search[32] = "";'),
+    ("s_bio", 'static char s_bio[256] = "Writing software that feels calm.";'), ("d_qty", "static double d_qty = 4;"),
+    ("d_date", "static cui_date d_date = { 2026, 11, 14 };"), ("open_true", "static bool open_true = true;"),
+]
+def scene_program(title, sc):
+    src = sc["source"].strip()
+    m = re.match(r"SCENE\(\w+\)\s*\{\n", src)
+    if not m or re.search(r"^(?:static|SCENE)\b", src[m.end():], re.M): return None   # more than the one scene body
+    body = src[m.end():src.rindex("}")].rstrip()
+    body = re.sub(r"\bUPTO\(([^()]*)\)", r".width = CUI_FILL, .max_width = \1", body)
+    body = re.sub(r"\bFLEX\(([^(),]*),\s*([^()]*)\)", r".width = CUI_FILL, .min_width = \1, .max_width = \2", body)
+    used = lambda *names: any(re.search(rf"\b{n}\s*\(", body) for n in names)
+    inc = ["#include <cui/cui.h>", "#include <cui/cui_app.h>"]
+    if used("sinf", "cosf", "sqrtf", "fabsf", "powf", "floorf", "fmodf", "sin", "cos"): inc.append("#include <math.h>")
+    if used("snprintf", "sprintf", "printf"): inc.append("#include <stdio.h>")
+    if used("rand", "abs", "malloc", "free", "atoi"): inc.append("#include <stdlib.h>")
+    if used("strlen", "strcmp", "strcpy", "strncpy", "memcpy", "memset", "strstr", "memmove"): inc.append("#include <string.h>")
+    globs = [decl for name, decl in SCENE_GLOBALS if re.search(rf"\b{name}\b", body)]
+    inner = "\n".join(("    " + l) if l.strip() else l for l in body.split("\n"))
+    w, hgt = max(420, int(sc["w"] + 56)), max(320, int(sc["h"] + 56))
+    return ("\n".join(inc) + "\n\n" + ("\n".join(globs) + "\n\n" if globs else "")
+            + "static void frame(cui_ctx *ui, void *user) {\n    (void)user;\n"
+            + "    cui_column(ui, .width = CUI_FILL, .height = CUI_FILL, .bg = CUI_COLOR_BACKGROUND, .pad = 28, .gap = 16) {\n"
+            + inner + "\n    }\n}\n\nint main(void) {\n"
+            + f'    return cui_app_run(&(cui_app_desc){{ .title = "{title}", .width = {w}, .height = {hgt} }}, frame, NULL);\n}}\n')
+
+def complete_programs(items, srcs):
+    import shutil, subprocess, tempfile
+    from concurrent.futures import ThreadPoolExecutor
+    cc = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+    cands = []
+    for it in items.values():
+        for name in it["scenes"]:
+            prog = scene_program(it["title"], srcs[name]) if name in srcs else None
+            if prog: cands.append((it, prog)); break
+    if not cc:
+        print("  complete programs: none (no C compiler here to check them with)")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        def builds(pair):
+            it, prog = pair
+            path = os.path.join(tmp, it["id"] + ".c")
+            open(path, "w", encoding="utf-8").write(prog)
+            return subprocess.run([cc, "-std=c99", "-fsyntax-only", "-w", "-I", os.path.join(ROOT, "include"), path], capture_output=True).returncode == 0
+        with ThreadPoolExecutor(8) as ex: ok = list(ex.map(builds, cands))
+    for (it, prog), good in zip(cands, ok):
+        if good: it["program"] = prog
+    print(f"  complete programs: {sum(ok)} of {len(items)} pages (a scene that needs helpers or staged input has none)")
+
 # ---------------------------------------------------------------- related components
 def related_items(it, items, cats_order, owners):
     rel = []
@@ -714,6 +921,8 @@ def main():
             it["html"] = re.sub(r"\s*Options: (?:<code>[\w.]+</code>(?:, and |, | and )?)+\.(?=\s|</p>)", "", it["html"])
             it["html"] = re.sub(r"<p>\s*</p>\n?", "", it["html"])
 
+    complete_programs(items, srcs)
+
     guides = []
     for gid in GUIDES:
         lines = read(f"docs/{gid}.md").split("\n")
@@ -767,8 +976,10 @@ def main():
     unlisted = [n for n in srcs if n not in covered]
 
     version = re.search(r"project\(cui\s+VERSION\s+([\d.]+)", read("CMakeLists.txt")).group(1)
+    ref = reference(fn_struct, owners, items)
     catalog = {
         "version": version,
+        "reference": ref,
         "categories": [{"id": c, "title": t, "items": cats[c]} for c, t in CATEGORIES if cats[c]],
         "items": items,
         "showcase": showcase,
@@ -793,6 +1004,9 @@ def main():
     n_key = sum(1 for it in items.values() if it["keyboard"])
     print(f"  options tables: {n_opt} components ({sum(len(it['options']) for it in items.values())} tables); "
           f"keyboard lists: {n_key}; header: {len(structs)} options structs, {len(fn_struct)} functions")
+    nfn = sum(len(x["fns"]) for x in ref)
+    print(f"  reference: {nfn} functions in {len(ref)} sections, {sum(1 for x in ref for f in x['fns'] if f['doc'])} with a description, "
+          f"{sum(1 for x in ref for f in x['fns'] if f['page'])} linked to a page")
     missing = [it["title"] for it in items.values() if not it["scenes"]]
     if missing: print("  no live scene:", ", ".join(missing))
 
