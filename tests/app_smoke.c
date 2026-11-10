@@ -25,14 +25,24 @@ static int smoke_ignore_x_error(Display *dpy, XErrorEvent *e) { (void)dpy; (void
 
 /* Walks the window tree as a window manager sees it (a manager may have
  * reparented the window into a frame) for a window whose WM_CLASS class is
- * the app ID. Only the class is compared: SDL3, under sdl2-compat, puts the
- * program's name in the instance part. */
+ * the app ID. The X11 and GLFW backends set the instance part to the ID as
+ * well, so it is compared too; with SDL2 it is not, because SDL3 under
+ * sdl2-compat puts the program's name there. */
+#if defined(CUI_SMOKE_SDL2)
+#define SMOKE_INSTANCE_IS_ID 0
+#else
+#define SMOKE_INSTANCE_IS_ID 1
+#endif
 static bool smoke_find_wm_class(Display *dpy, Window w, int depth) {
     XClassHint ch = { 0 };
     bool found = false;
     if (XGetClassHint(dpy, w, &ch)) {
         found = ch.res_name && ch.res_class && strcmp(ch.res_class, SMOKE_APP_ID) == 0;
         if (found) printf("WM_CLASS=\"%s\", \"%s\"\n", ch.res_name, ch.res_class);
+        if (found && SMOKE_INSTANCE_IS_ID && strcmp(ch.res_name, SMOKE_APP_ID) != 0) {
+            printf("WM_CLASS: the instance part is not %s\n", SMOKE_APP_ID);
+            found = false;
+        }
         if (ch.res_name) XFree(ch.res_name);
         if (ch.res_class) XFree(ch.res_class);
     }
