@@ -34,6 +34,15 @@ static const char *cui__sdl_get_clip(void *user) {
 }
 
 bool cui__plat_init(cui_app *app) {
+    /* The app ID becomes WM_CLASS (X11) and the app_id (Wayland). SDL2 reads it
+     * from these variables when video starts, Wayland falling back to the X11
+     * one; SDL3 under sdl2-compat reads the SDL_APP_ID hint. Values the user
+     * set in the environment win. */
+    if (app->desc.app_id) {
+        SDL_SetHint("SDL_APP_ID", app->desc.app_id);
+        SDL_setenv("SDL_VIDEO_X11_WMCLASS", app->desc.app_id, 0);
+        SDL_setenv("SDL_VIDEO_WAYLAND_WMCLASS", app->desc.app_id, 0);
+    }
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) return false;
     cui__sdl *s = calloc(1, sizeof *s);
     if (!s) return false;

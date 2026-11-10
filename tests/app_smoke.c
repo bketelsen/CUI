@@ -8,10 +8,61 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define SMOKE_APP_ID "io.github.yappologistic.CUI.SmokeTest"
+
+#ifdef CUI_SMOKE_X11
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <string.h>
+
+static int smoke_ignore_x_error(Display *dpy, XErrorEvent *e) { (void)dpy; (void)e; return 0; }
+
+/* Walks the window tree as a window manager sees it (a manager may have
+ * reparented the window into a frame) for a window whose WM_CLASS class is
+ * the app ID. Only the class is compared: SDL3, under sdl2-compat, puts the
+ * program's name in the instance part. */
+static bool smoke_find_wm_class(Display *dpy, Window w, int depth) {
+    XClassHint ch = { 0 };
+    bool found = false;
+    if (XGetClassHint(dpy, w, &ch)) {
+        found = ch.res_name && ch.res_class && strcmp(ch.res_class, SMOKE_APP_ID) == 0;
+        if (found) printf("WM_CLASS=\"%s\", \"%s\"\n", ch.res_name, ch.res_class);
+        if (ch.res_name) XFree(ch.res_name);
+        if (ch.res_class) XFree(ch.res_class);
+    }
+    Window root, parent, *kids = NULL;
+    unsigned n = 0;
+    if (!found && depth > 0 && XQueryTree(dpy, w, &root, &parent, &kids, &n)) {
+        for (unsigned i = 0; i < n && !found; i++) found = smoke_find_wm_class(dpy, kids[i], depth - 1);
+        if (kids) XFree(kids);
+    }
+    return found;
+}
+
+/* Desktops match a window to its .desktop file by WM_CLASS. Checked on the
+ * X11 backend, and with SDL2 or GLFW when there is no Wayland to pick. */
+static bool smoke_app_id_ok(cui_app *app) {
+    if (strcmp(cui_app_backend(app), "x11") != 0 && getenv("WAYLAND_DISPLAY")) {
+        printf("WM_CLASS not checked: %s may be on Wayland\n", cui_app_backend(app));
+        return true;
+    }
+    Display *dpy = XOpenDisplay(NULL);
+    if (!dpy) return false;
+    XErrorHandler old = XSetErrorHandler(smoke_ignore_x_error);   /* other clients' windows may close mid-walk */
+    bool found = smoke_find_wm_class(dpy, DefaultRootWindow(dpy), 3);
+    XSync(dpy, False);
+    XSetErrorHandler(old);
+    XCloseDisplay(dpy);
+    if (!found) printf("WM_CLASS: no window carries %s\n", SMOKE_APP_ID);
+    return found;
+}
+#endif
+
 int main(int argc, char **argv) {
     const char *out = argc > 1 ? argv[1] : "app_smoke.png";
     setvbuf(stdout, NULL, _IONBF, 0);
-    cui_app *app = cui_app_create(&(cui_app_desc){ .title = "CUI smoke test", .width = 1000, .height = 700, .continuous = true });
+    cui_app *app = cui_app_create(&(cui_app_desc){ .title = "CUI smoke test", .width = 1000, .height = 700, .continuous = true,
+                                                   .app_id = SMOKE_APP_ID });
     if (!app) { fprintf(stderr, "could not create app\n"); return 1; }
     printf("backend=%s renderer=%s\n", cui_app_backend(app), cui_app_is_software(app) ? "software" : "opengl");
     static gallery g;
@@ -45,10 +96,14 @@ int main(int argc, char **argv) {
     printf("size=%.0fx%.0f screenshot=%s switch_clicked=%s (switch at %.0f,%.0f %.0fx%.0f)\n", sz.x, sz.y, ok ? out : "failed", switched ? "yes" : "no",
            g.bluetooth_rect.x, g.bluetooth_rect.y, g.bluetooth_rect.w, g.bluetooth_rect.h);
     free(px);
+    bool app_id_ok = true;
+#ifdef CUI_SMOKE_X11
+    app_id_ok = smoke_app_id_ok(app);
+#endif
     cui_app_destroy(app);
     /* a continuous app runs at the display's rate, not as fast as the machine can draw */
     double fps = t1 > t0 ? 39.0 / (t1 - t0) : 0;
     bool paced = fps > 0 && fps < 250;
     printf("animation: %.0f frames per second%s\n", fps, paced ? "" : " (not paced)");
-    return (ok && switched && paced) ? 0 : 1;
+    return (ok && switched && paced && app_id_ok) ? 0 : 1;
 }

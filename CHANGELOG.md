@@ -2,6 +2,12 @@
 
 What changed in CUI, newest first. Every component mentioned here runs live in the docs.
 
+## Unreleased
+
+### Added
+
+- `cui_app_desc.app_id` lets a Linux desktop show your app's name and icon for its window in the taskbar, the dock and Alt+Tab. Name your `.desktop` file after the ID (for example `org.example.Notes.desktop`). It sets `WM_CLASS` on X11, and the Wayland app ID with SDL2 or GLFW 3.4. Before this, every window of the X11 backend had the class `CUI`. See [Your app's name and icon on Linux](docs/getting-started.md#your-apps-name-and-icon-on-linux).
+
 ## 2026-11-09 · 1.3.1: first steps, a tutorial and ready-to-run examples
 
 A release for people starting out. Every step of the getting-started guide was followed as written, and what did not work is fixed.
