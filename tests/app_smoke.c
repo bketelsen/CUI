@@ -14,6 +14,12 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <string.h>
+#if defined(CUI_SMOKE_SDL2)
+#define SDL_MAIN_HANDLED
+#include <SDL.h>
+#elif defined(CUI_SMOKE_GLFW)
+#include <GLFW/glfw3.h>
+#endif
 
 static int smoke_ignore_x_error(Display *dpy, XErrorEvent *e) { (void)dpy; (void)e; return 0; }
 
@@ -39,11 +45,34 @@ static bool smoke_find_wm_class(Display *dpy, Window w, int depth) {
     return found;
 }
 
-/* Desktops match a window to its .desktop file by WM_CLASS. Checked on the
- * X11 backend, and with SDL2 or GLFW when there is no Wayland to pick. */
+/* The window system the backend picked; only X11 has a WM_CLASS to read. */
+static const char *smoke_window_system(void) {
+#if defined(CUI_SMOKE_SDL2)
+    const char *driver = SDL_GetCurrentVideoDriver();
+    return driver ? driver : "no video driver";
+#elif defined(CUI_SMOKE_GLFW) && defined(GLFW_PLATFORM_X11)   /* GLFW 3.4 */
+    return glfwGetPlatform() == GLFW_PLATFORM_X11 ? "x11" : "a platform other than X11";
+#elif defined(CUI_SMOKE_GLFW)   /* GLFW 3.3 cannot say which one it picked */
+    return getenv("WAYLAND_DISPLAY") ? "X11 or Wayland (GLFW 3.3 does not say)" : "x11";
+#else
+    return "x11";
+#endif
+}
+
+/* Desktops match a window to its .desktop file by WM_CLASS. */
 static bool smoke_app_id_ok(cui_app *app) {
-    if (strcmp(cui_app_backend(app), "x11") != 0 && getenv("WAYLAND_DISPLAY")) {
-        printf("WM_CLASS not checked: %s may be on Wayland\n", cui_app_backend(app));
+#if defined(CUI_SMOKE_SDL2)
+    /* SDL2 read the ID from the environment in SDL_Init; it must not stay
+     * there for child processes or a later app to inherit */
+    const char *left = getenv("SDL_VIDEO_X11_WMCLASS");
+    if (left && strcmp(left, SMOKE_APP_ID) == 0) {
+        printf("SDL_VIDEO_X11_WMCLASS was left set to %s\n", left);
+        return false;
+    }
+#endif
+    const char *system = smoke_window_system();
+    if (strcmp(system, "x11") != 0) {
+        printf("WM_CLASS not checked: %s runs on %s\n", cui_app_backend(app), system);
         return true;
     }
     Display *dpy = XOpenDisplay(NULL);
